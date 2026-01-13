@@ -1,6 +1,6 @@
 {
   "name": "picgo-plugin-multi-uploader",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Upload one image to multiple image beds in parallel with retry and Markdown summary support for PicGo.",
   "main": "index.js",
   "keywords": [

@@ -1,83 +1,86 @@
 /**
  * PicGo Plugin: Multi-Uploader v1.3.1 (fixed)
- * 修复点：
- * - 在 beforeUpload 阶段缓存原始图片数据（buffer/base64）
- * - 为备份 uploader 构建使用缓存数据的 clonedCtx（清除 url/imgUrl 强制上传）
- * - 跳过当前默认图床（避免重复上传）
- * - Markdown 兼容更多返回字段
+ * Key improvements:
+ * - Caches original image data (buffer/base64) during beforeUpload phase.
+ * - Constructs a clonedCtx for backup uploaders using cached data (clearing url/imgUrl to force upload).
+ * - Skips the current default uploader to avoid redundant uploads.
+ * - Markdown summary supports multiple return fields for better compatibility.
  */
 
 module.exports = (ctx) => {
   const PLUGIN_NAME = 'picgo-plugin-multi-uploader'
 
-  // 用于缓存 beforeUpload 的原始图片数据（包含 buffer/base64）
+  // Used to cache original image data (including buffer/base64) from beforeUpload
   let cachedImageData = null
 
-  /** 注册配置项 */
+  /** Register configuration options */
   const registerConfig = () => {
     return [
       {
         name: 'enabledBeds',
         type: 'string',
         default: 'smms,github',
-        message: '启用的图床（用逗号分隔）',
-        alias: '启用图床'
+        message: 'Enabled image beds (comma-separated)',
+        alias: 'Enabled Beds'
       },
       {
         name: 'unifyFileName',
         type: 'boolean',
         default: true,
-        message: '是否保持统一文件名',
-        alias: '统一文件名'
+        message: 'Whether to maintain a unified filename across all beds',
+        alias: 'Unify Filename'
       },
       {
         name: 'retryCount',
         type: 'number',
         default: 2,
-        message: '失败重试次数',
-        alias: '重试次数'
+        message: 'Number of retry attempts on failure',
+        alias: 'Retry Count'
       },
       {
         name: 'retryDelay',
         type: 'number',
         default: 2000,
-        message: '每次重试间隔（毫秒）',
-        alias: '重试间隔'
+        message: 'Delay between retries (milliseconds)',
+        alias: 'Retry Delay'
       },
       {
         name: 'generateMarkdown',
         type: 'boolean',
         default: true,
-        message: '是否生成 Markdown 链接汇总',
-        alias: '生成 Markdown'
+        message: 'Whether to generate a Markdown summary of links',
+        alias: 'Generate Markdown'
       }
     ]
   }
 
   const delay = (ms) => new Promise((res) => setTimeout(res, ms))
 
-  // helper: 获取当前默认 uploader（兼容不同 config 键）
+  // Helper: Get the current default uploader (compatible with different config keys)
   const getCurrentUploader = (ctx) => {
     return ctx.getConfig('picBed.uploader') || ctx.getConfig('picBed.current')
   }
 
   /**
-   * 上传逻辑（带自动重试 + 使用缓存数据构建独立上下文）
-   * bed: uploader name
+   * Upload logic with automatic retry and isolated context construction
+   * @param {string} bed - The name of the uploader
+   * @param {object} ctx - PicGo context
+   * @param {number} retryCount - Maximum retries
+   * @param {number} retryDelay - Delay between retries
    */
   const uploadWithRetry = async (bed, ctx, retryCount, retryDelay) => {
     const uploader = ctx.helper.uploader.get(bed)
     if (!uploader || !uploader.handle) {
-      throw new Error(`未找到 uploader: ${bed}`)
+      throw new Error(`Uploader not found: ${bed}`)
     }
 
     let attempts = 0
     while (attempts <= retryCount) {
       try {
-        // 使用缓存的原始图片数据来构建 clonedCtx.output
-        // 深拷贝 cachedImageData 保证独立
+        // Build clonedCtx.output using cached original image data
+        // Deep map cachedImageData to ensure independence
         const clonedOutput = (cachedImageData || []).map((item) => {
-          // --- 修复 Buffer 构造 ---
+          // Fix Buffer construction
           let realBuffer = undefined
           if (item.buffer) {
             realBuffer = Buffer.isBuffer(item.buffer)
@@ -92,9 +95,9 @@ module.exports = (ctx) => {
             fileName: item.fileName,
             extname: item.extname,
             buffer: realBuffer,
-            // 不传 base64Image，让 uploader 使用 buffer 方式上传
+            // Clear base64Image to force uploader to use buffer mode
             base64Image: undefined,
-            // 清除 url/imgUrl，强制 uploader 真正上传
+            // Clear existing URLs to force the uploader to perform a real upload
             url: undefined,
             imgUrl: undefined
           }
@@ -104,11 +107,11 @@ module.exports = (ctx) => {
           getConfig: (name) => ctx.getConfig(name),
           log: ctx.log,
           input: [...(ctx.input || [])],
-          // 🚨 保留 Buffer 原样传递，不能 JSON.stringify
+          // Retain Buffer objects without JSON stringification to preserve binary data
           output: clonedOutput.map(i => ({
             fileName: i.fileName,
             extname: i.extname,
-            buffer: i.buffer, // 直接保留 Buffer
+            buffer: i.buffer,
             base64Image: i.base64Image,
             url: undefined,
             imgUrl: undefined
@@ -119,43 +122,43 @@ module.exports = (ctx) => {
           Request: ctx.Request
         }
 
-        // Some uploaders expect ctx.baseDir etc.
+        // Pass through essential context properties if they exist
         if (ctx.baseDir) clonedCtx.baseDir = ctx.baseDir
         if (ctx.configPath) clonedCtx.configPath = ctx.configPath
 
         await uploader.handle(clonedCtx)
 
-        // uploader 应该写回 clonedCtx.output，检查是否包含 URL
+        // The uploader should write back to clonedCtx.output; verify the results
         if (!clonedCtx.output || !Array.isArray(clonedCtx.output) || clonedCtx.output.length === 0) {
-          throw new Error(`uploader ${bed} 未返回有效 output`)
+          throw new Error(`Uploader ${bed} returned no valid output`)
         }
 
-        // 检查是否至少一个 item 含有 url/imgUrl
+        // Check if at least one item contains a valid URL
         const hasUrl = clonedCtx.output.some(i => i.url || i.imgUrl || i.image || i.source)
         if (!hasUrl) {
-          throw new Error(`uploader ${bed} 未返回任何 url/imgUrl`)
+          throw new Error(`Uploader ${bed} returned no URL/imgUrl`)
         }
 
-        ctx.log.info(`[${PLUGIN_NAME}] ✅ ${bed} 上传成功`)
+        ctx.log.info(`[${PLUGIN_NAME}] ✅ ${bed} upload successful`)
         return clonedCtx.output
       } catch (err) {
         attempts++
         if (attempts > retryCount) {
-          ctx.log.error(`[${PLUGIN_NAME}] ❌ ${bed} 上传失败，已达最大重试次数: ${err.message}`)
+          ctx.log.error(`[${PLUGIN_NAME}] ❌ ${bed} upload failed after maximum retries: ${err.message}`)
           return null
         } else {
-          ctx.log.warn(`[${PLUGIN_NAME}] ⚠️ ${bed} 上传失败，第 ${attempts} 次重试中... (${err.message})`)
+          ctx.log.warn(`[${PLUGIN_NAME}] ⚠️ ${bed} upload failed, retrying (${attempts}/${retryCount})... Error: ${err.message}`)
           await delay(retryDelay)
         }
       }
     }
   }
 
-  /** beforeUpload: 缓存原始图片数据并（可选）统一文件名 */
+  /** beforeUpload: Cache original data and optionally unify filename */
   ctx.helper.beforeUploadPlugins.register(PLUGIN_NAME, {
     handle: async (ctx) => {
       const config = ctx.getConfig(PLUGIN_NAME) || {}
-      // 深拷贝 ctx.output 并保存 buffer/base64 至 cachedImageData
+      // Deep copy ctx.output and save buffer/base64 to cachedImageData
       cachedImageData = (ctx.output || []).map(item => ({
         fileName: item.fileName || (Date.now() + (item.extname || '.png')),
         extname: item.extname || '.png',
@@ -163,7 +166,7 @@ module.exports = (ctx) => {
         base64Image: item.base64Image ? item.base64Image : undefined
       }))
 
-      // 统一文件名（写回 ctx.output，主上传会使用）
+      // Unify filename if enabled (writes back to ctx.output for the primary uploader)
       if (config?.unifyFileName) {
         const now = new Date()
         const pad = (n) => String(n).padStart(2, '0')
@@ -172,47 +175,48 @@ module.exports = (ctx) => {
         ctx.output.forEach((item, idx) => {
           const ext = item.extname || cachedImageData[idx]?.extname || '.png'
           item.fileName = `pic_${formatted}${ext}`
-          // 同步缓存中的名称
+          // Sync unified name with the cache
           if (cachedImageData[idx]) cachedImageData[idx].fileName = item.fileName
         })
       
-        ctx.log.info(`[${PLUGIN_NAME}] 文件名统一为: ${ctx.output[0]?.fileName}`)
+        ctx.log.info(`[${PLUGIN_NAME}] Filename unified to: ${ctx.output[0]?.fileName}`)
       } else {
-        ctx.log.info(`[${PLUGIN_NAME}] 已缓存 ${cachedImageData.length} 个文件以备份使用`)
+        ctx.log.info(`[${PLUGIN_NAME}] Cached ${cachedImageData.length} files for backup use`)
       }
       return ctx
     }
   })
 
-  /** afterUpload: 并行上传 + 自动重试 + Markdown 汇总（跳过主图床） */
+  /** afterUpload: Parallel upload + Retry + Markdown Summary (Skips primary bed) */
   ctx.helper.afterUploadPlugins.register(PLUGIN_NAME, {
     handle: async (ctx) => {
       const config = ctx.getConfig(PLUGIN_NAME) || {}
       if (!config?.enabledBeds) {
-        ctx.log.warn(`[${PLUGIN_NAME}] 未配置启用的图床`)
-        // 清理缓存防内存泄漏
+        ctx.log.warn(`[${PLUGIN_NAME}] No backup image beds configured`)
+        // Clear cache to prevent memory leaks
         cachedImageData = null
         return ctx
       }
 
       const allBeds = config.enabledBeds.split(',').map(b => b.trim()).filter(Boolean)
       const current = getCurrentUploader(ctx)
-      // 跳过当前默认主图床，避免重复上传
+      
+      // Skip the current default uploader to avoid duplicate uploads
       const beds = allBeds.filter(b => b !== current)
 
       if (beds.length === 0) {
-        ctx.log.warn(`[${PLUGIN_NAME}] 没有备份图床（或所有备份图床都与当前图床相同），跳过`)
+        ctx.log.warn(`[${PLUGIN_NAME}] No backup beds found (or all matched the primary bed), skipping`)
         cachedImageData = null
         return ctx
       }
 
-      ctx.log.info(`[${PLUGIN_NAME}] 🚀 并行上传到多个图床: ${beds.join(', ')}`)
+      ctx.log.info(`[${PLUGIN_NAME}] 🚀 Parallel uploading to: ${beds.join(', ')}`)
 
-      // 并行上传
+      // Execute uploads in parallel
       const tasks = beds.map(bed => uploadWithRetry(bed, ctx, config.retryCount || 2, config.retryDelay || 2000).then(output => ({ bed, output })))
       const results = await Promise.allSettled(tasks)
 
-      // 收集成功结果
+      // Collect successful results
       const mergedOutput = []
       results.forEach(r => {
         if (r.status === 'fulfilled' && r.value && r.value.output) {
@@ -220,38 +224,41 @@ module.exports = (ctx) => {
           const outs = r.value.output.map(i => ({ ...i, uploader: bed }))
           mergedOutput.push(...outs)
         } else if (r.status === 'fulfilled' && r.value && !r.value.output) {
-          ctx.log.warn(`[${PLUGIN_NAME}] ${r.value.bed} 返回空结果`)
+          ctx.log.warn(`[${PLUGIN_NAME}] ${r.value.bed} returned empty results`)
         } else {
-          ctx.log.error(`[${PLUGIN_NAME}] 备份任务异常:`, r.reason || (r.value && r.value.error) || 'unknown')
+          ctx.log.error(`[${PLUGIN_NAME}] Backup task exception:`, r.reason || (r.value && r.value.error) || 'unknown')
         }
       })
 
-      // 最终合并：把主图床原始 ctx.output（主上传结果）也保留，然后追加备份结果
+      // Merge primary upload results with backup results
       const finalOutput = []
-      // 保证主上传结果先列出（ctx.output 是主上传写回的结果）
+      // List primary results first
       if (Array.isArray(ctx.output)) {
         finalOutput.push(...ctx.output.map(i => ({ ...i, uploader: current || 'primary' })))
       }
       if (mergedOutput.length > 0) finalOutput.push(...mergedOutput)
 
       ctx.output = finalOutput
-      ctx.log.success(`[${PLUGIN_NAME}] 🎉 多图床上传完成 (${finalOutput.length} 条结果)`)
+      ctx.log.success(`[${PLUGIN_NAME}] 🎉 Multi-bed upload completed (${finalOutput.length} results)`)
 
-      // 生成 Markdown（兼容多个字段）
+      // Generate Markdown table with compatibility for multiple URL fields
       if (config.generateMarkdown) {
         const markdown = generateMarkdownTable(finalOutput)
-        ctx.log.info('\n📋 Markdown 链接汇总：\n')
+        ctx.log.info('\n📋 Markdown Link Summary:\n')
         console.log(markdown)
-        ctx.emit && ctx.emit('notification') // 触发 GUI 通知（如果可用）
+        ctx.emit && ctx.emit('notification') // Trigger GUI notification if available
       }
 
-      // 清理缓存
+      // Final cleanup
       cachedImageData = null
       return ctx
     }
   })
 
-  /** Markdown 表生成函数 */
+  /**
+   * Helper function to generate a Markdown table from upload results
+   * @param {Array} images - Array of image output objects
+   */
   function generateMarkdownTable(images) {
     if (!images || images.length === 0) return ''
     const grouped = {}
@@ -264,7 +271,7 @@ module.exports = (ctx) => {
     let md = ''
     for (const [filename, imgs] of Object.entries(grouped)) {
       md += `### 🖼️ ${filename}\n\n`
-      md += '| 图床 | 预览 | 链接 |\n|------|------|------|\n'
+      md += '| Bed | Preview | Link |\n|------|------|------|\n'
       imgs.forEach(img => {
         const url = img.url || img.imgUrl || img.image || img.source || ''
         md += `| ${img.uploader || '-'} | ![](${url}) | [${url}](${url}) |\n`
